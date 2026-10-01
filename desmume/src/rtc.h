@@ -27,6 +27,10 @@
 extern int rtcHourOverride;
 
 DateTime rtcGetTime(void);
+// Makes the RTC deterministic outside movie mode: time starts at `start` on reset and advances with
+// emulated frames (the same arithmetic movie playback uses). rtcClearFixedStartTime restores wall-clock.
+void rtcSetFixedStartTime(const DateTime &start);
+void rtcClearFixedStartTime();
 void rtcGetTimeAsString(char *buffer);
 
 extern	void rtcInit();

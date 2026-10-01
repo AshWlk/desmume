@@ -3260,7 +3260,9 @@ public:
 	virtual void breakloop(void *dev);
 };
 
-#ifndef HOST_WINDOWS
+// DESMUME_NO_PCAP: headless builds that never install a real pcap interface (the default is
+// DummyPCapInterface) can omit this class and avoid linking libpcap.
+#if !defined(HOST_WINDOWS) && !defined(DESMUME_NO_PCAP)
 
 class POSIXPCapInterface : public ClientPCapInterface
 {

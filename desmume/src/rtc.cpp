@@ -94,9 +94,23 @@ static inline u8 toBCD(u8 x)
 
 bool moviemode=false;
 
+static bool rtcUseFixedStartTime = false;
+static DateTime rtcFixedStartTime;
+
+void rtcSetFixedStartTime(const DateTime &start)
+{
+	rtcFixedStartTime = start;
+	rtcUseFixedStartTime = true;
+}
+
+void rtcClearFixedStartTime()
+{
+	rtcUseFixedStartTime = false;
+}
+
 DateTime rtcGetTime(void)
 {
-	if(movieMode == MOVIEMODE_INACTIVE) {
+	if(movieMode == MOVIEMODE_INACTIVE && !rtcUseFixedStartTime) {
 		return DateTime::get_Now().AddHours(rtcHourOverride);
 	}
 	else {
@@ -110,7 +124,7 @@ DateTime rtcGetTime(void)
 		u64 totalcycles = (u64)arm9rate_unitsperframe * currFrameCounter;
 		u64 totalseconds=totalcycles/arm9rate_unitspersecond;
 
-		DateTime timer = currMovieData.rtcStart;
+		DateTime timer = (movieMode == MOVIEMODE_INACTIVE) ? rtcFixedStartTime : currMovieData.rtcStart;
 		return timer.AddSeconds(totalseconds);
 	}
 }

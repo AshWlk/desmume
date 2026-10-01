@@ -110,7 +110,19 @@ static u16 cos_lut[COSINE_INTERPOLATION_RESOLUTION];
 
 static const double ARM7_CLOCK = 33513982;
 
-static const double samples_per_hline = (DESMUME_SAMPLE_RATE / 59.8261f) / 263.0f;
+static u32 _sampleRate = DESMUME_SAMPLE_RATE;
+static double samples_per_hline = (DESMUME_SAMPLE_RATE / 59.8261f) / 263.0f;
+
+void SPU_SetSampleRate(u32 sampleRate)
+{
+	_sampleRate = sampleRate;
+	samples_per_hline = (sampleRate / 59.8261f) / 263.0f;
+}
+
+u32 SPU_GetSampleRate()
+{
+	return _sampleRate;
+}
 
 static double _samples = 0;
 int spu_core_samples = 0;
@@ -388,7 +400,7 @@ static FORCEINLINE void adjust_channel_timer(channel_struct *chan)
 	//  ARM7_CLOCK / (DESMUME_SAMPLE_RATE*2) / (2^16 - Timer)
 	// = ARM7_CLOCK / (DESMUME_SAMPLE_RATE*2 * (2^16 - Timer))
 	// ... and then round up for good measure
-	u64 sampinc = ((u32)ARM7_CLOCK*(1ull << 32) - 1) / (DESMUME_SAMPLE_RATE * 2ull * (0x10000 - chan->timer)) + 1;
+	u64 sampinc = ((u32)ARM7_CLOCK*(1ull << 32) - 1) / (_sampleRate * 2ull * (0x10000 - chan->timer)) + 1;
 	chan->sampincInt = (u32)(sampinc >> 32), chan->sampincFrac = (u32)sampinc;
 }
 
@@ -1775,7 +1787,7 @@ SoundInterface_struct SNDDummy = {
 int SNDDummyInit(int buffersize) { return 0; }
 void SNDDummyDeInit() {}
 void SNDDummyUpdateAudio(s16 *buffer, u32 num_samples) { }
-u32 SNDDummyGetAudioSpace() { return DESMUME_SAMPLE_RATE/60 + 5; }
+u32 SNDDummyGetAudioSpace() { return _sampleRate/60 + 5; }
 void SNDDummyMuteAudio() {}
 void SNDDummyUnMuteAudio() {}
 void SNDDummySetVolume(int volume) {}
@@ -1830,7 +1842,7 @@ bool WavWriter::open(const std::string & fname)
 	fmt.chunk.size = 16; // we'll fix this at the end
 	fmt.compress = 1; // PCM
 	fmt.numchan = 2; // Stereo
-	fmt.rate = DESMUME_SAMPLE_RATE;
+	fmt.rate = _sampleRate;
 	fmt.bitspersample = 16;
 	fmt.blockalign = fmt.bitspersample / 8 * fmt.numchan;
 	fmt.bytespersec = fmt.rate * fmt.blockalign;

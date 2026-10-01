@@ -233,6 +233,87 @@ BackupDevice::BackupDevice()
 
 	if (gameInfo.romsize == 0) return;
 
+	if (CommonSettings.backupDeviceInMemory)
+		_fpMC = new EMUFILE_MEMORY();
+	else
+		_openBackupFile();
+	
+	if (!_fpMC->fail())
+	{
+		_fsize = _fpMC->size();
+		if (_fsize < saveSizes[0])
+			_fpMC->truncate(0);
+
+		if (readFooter() == 0)
+			_fsize -= BackupDevice::GetDSVFooterSize();
+		else
+		{
+			memset(&_info, 0, sizeof(_info));
+			_fsize = 0;
+		}
+	
+		_fpMC->fseek(0, SEEK_SET);
+
+		u32 left = 0;
+		if (CommonSettings.autodetectBackupMethod == BackupDeviceAutodetectMethod_Advanscene)
+		{
+			if (advsc.isLoaded())
+			{
+				_info.type = advsc.getSaveType();
+				if (_info.type != 0xFF && _info.type != 0xFE)
+				{
+					_info.type++;
+					u32 adv_size = save_types[_info.type].size;
+					if (_info.size > adv_size)
+					{
+						_info.size = adv_size;
+						_fpMC->truncate(adv_size);
+						ensure(adv_size, _fpMC);
+					}
+					else
+						if (_info.size < adv_size)
+						{
+							left = adv_size - _info.size;
+							_info.size = adv_size;
+							ensure(adv_size);
+						}
+
+					_fsize = adv_size;
+				}
+			}
+		}
+
+		_addr_size = _info.addr_size;
+		_info.padSize = _fsize;
+		//none of the other fields are used right now
+
+		if ( (CommonSettings.autodetectBackupMethod != BackupDeviceAutodetectMethod_Advanscene) && (_info.type == 0) )
+		{
+			_info.type = searchFileSaveType(_info.size);
+			if (_info.type == 0xFF) _info.type = 0;
+		}
+
+		u32 ss = (_info.padSize * 8) / 1024;
+		bool _Mbit = false;
+
+		if (ss >= 1024)
+		{
+			ss /= 1024;
+			_Mbit = true;
+		}
+
+		if (ss > 0)
+			printf("BackupDevice: size = %u %cbit\n", ss, _Mbit?'M':'K');
+	}
+
+	_state = (_fsize > 0) ? RUNNING : DETECTING;
+	reset();
+}
+
+//opens (or creates) the .dsv next to the ROM, importing a .sav if there's no .dsv yet.
+//falls back to RAM if the file can't be opened read/write.
+void BackupDevice::_openBackupFile()
+{
 	char filePathStr[MAX_PATH] = {0};
 	memset(filePathStr, 0, MAX_PATH);
 	path.getpathnoext(path.BATTERY, filePathStr);
@@ -340,77 +421,6 @@ BackupDevice::BackupDevice()
 		_fpMC = new EMUFILE_MEMORY();
 		printf("BackupDevice: WARNING! Failed to get read/write access to the save file! Will operate in RAM instead.\n");
 	}
-	
-	if (!_fpMC->fail())
-	{
-		_fsize = _fpMC->size();
-		if (_fsize < saveSizes[0])
-			_fpMC->truncate(0);
-
-		if (readFooter() == 0)
-			_fsize -= BackupDevice::GetDSVFooterSize();
-		else
-		{
-			memset(&_info, 0, sizeof(_info));
-			_fsize = 0;
-		}
-	
-		_fpMC->fseek(0, SEEK_SET);
-
-		u32 left = 0;
-		if (CommonSettings.autodetectBackupMethod == BackupDeviceAutodetectMethod_Advanscene)
-		{
-			if (advsc.isLoaded())
-			{
-				_info.type = advsc.getSaveType();
-				if (_info.type != 0xFF && _info.type != 0xFE)
-				{
-					_info.type++;
-					u32 adv_size = save_types[_info.type].size;
-					if (_info.size > adv_size)
-					{
-						_info.size = adv_size;
-						_fpMC->truncate(adv_size);
-						ensure(adv_size, _fpMC);
-					}
-					else
-						if (_info.size < adv_size)
-						{
-							left = adv_size - _info.size;
-							_info.size = adv_size;
-							ensure(adv_size);
-						}
-
-					_fsize = adv_size;
-				}
-			}
-		}
-
-		_addr_size = _info.addr_size;
-		_info.padSize = _fsize;
-		//none of the other fields are used right now
-
-		if ( (CommonSettings.autodetectBackupMethod != BackupDeviceAutodetectMethod_Advanscene) && (_info.type == 0) )
-		{
-			_info.type = searchFileSaveType(_info.size);
-			if (_info.type == 0xFF) _info.type = 0;
-		}
-
-		u32 ss = (_info.padSize * 8) / 1024;
-		bool _Mbit = false;
-
-		if (ss >= 1024)
-		{
-			ss /= 1024;
-			_Mbit = true;
-		}
-
-		if (ss > 0)
-			printf("BackupDevice: size = %u %cbit\n", ss, _Mbit?'M':'K');
-	}
-
-	_state = (_fsize > 0) ? RUNNING : DETECTING;
-	reset();
 }
 
 BackupDevice::~BackupDevice()

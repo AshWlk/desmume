@@ -214,6 +214,16 @@ void PathInfo::LoadModulePath()
 	std::string pathStr = Path::GetFileDirectoryPath(path);
 
 	strncpy(pathToModule, pathStr.c_str(), MAX_PATH);
+#elif defined(DESMUME_NO_GLIB)
+	// headless builds without glib: same location glib would pick, but nothing is created on disk
+	const char *configHome = getenv("XDG_CONFIG_HOME");
+	const char *home = getenv("HOME");
+	if (configHome != NULL && configHome[0] != '\0')
+		snprintf(pathToModule, MAX_PATH, "%s/desmume", configHome);
+	else if (home != NULL)
+		snprintf(pathToModule, MAX_PATH, "%s/.config/desmume", home);
+	else
+		pathToModule[0] = '\0';
 #else
 	char *cwd = g_build_filename(g_get_user_config_dir(), "desmume", NULL);
 	g_mkdir_with_parents(cwd, 0755);

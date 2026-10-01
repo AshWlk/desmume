@@ -355,6 +355,7 @@ struct GameInfo
 	bool IsCode(const char* code) const;
 
 	bool loadROM(std::string fname, u32 type = ROM_NDS);
+	bool loadROMFromMemory(const u8 *data, u32 size);
 	void closeROM();
 	u32 readROM(u32 pos);
 	bool ValidateHeader();
@@ -362,6 +363,9 @@ struct GameInfo
 	bool isDSiEnhanced();
 	bool isHomebrew();
 	bool hasRomBanner();
+
+private:
+	bool _loadROMFromOpenReader(u32 type);
 };
 
 typedef struct TSCalInfo
@@ -449,6 +453,9 @@ void NDS_suspendProcessingInput(bool suspend);
 
 
 int NDS_LoadROM(const char *filename, const char* physicalFilename=0, const char* logicalFilename=0);
+//loads a ROM image from memory (copied) and resets the system. skips the path, cheat, movie,
+//game database and DLDI handling that NDS_LoadROM does, so it touches no files.
+int NDS_LoadROMFromMemory(const u8 *data, u32 size);
 void NDS_FreeROM(void);
 void NDS_Reset();
 
@@ -580,6 +587,8 @@ struct TCommonSettings
 	//this is the user's choice of manual backup type, for cases when the autodetection can't be trusted
 	int manualBackupType;
 	bool backupSave;
+	//keep backup memory (EEPROM/FLASH/FRAM) in RAM only; never read or create a .dsv/.sav file
+	bool backupDeviceInMemory;
 
 	int SPU_sync_mode;
 	int SPU_sync_method;

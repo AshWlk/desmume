@@ -32,7 +32,7 @@
 #define mkdir(A, B) mkdir(A)
 #endif
 
-#elif !defined(DESMUME_COCOA)
+#elif !defined(DESMUME_COCOA) && !defined(DESMUME_NO_GLIB)
 	#include <glib.h>
 #endif /* HOST_WINDOWS */
 

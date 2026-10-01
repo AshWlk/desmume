@@ -302,4 +302,10 @@ void WAV_WavSoundUpdate(void* soundData, int numSamples, WAVMode mode=WAVMODE_CO
 #define DESMUME_SAMPLE_RATE 44100
 //#define DESMUME_SAMPLE_RATE 48000
 
+// The rate the SPU core actually mixes at. Defaults to DESMUME_SAMPLE_RATE, which frontends still
+// use as a compile-time constant. A new rate takes full effect at the next SPU_Init (NDS_Init, or
+// the SPU_ReInit inside NDS_Reset), because SPU_core's per-scanline buffer is sized from it.
+void SPU_SetSampleRate(u32 sampleRate);
+u32 SPU_GetSampleRate();
+
 #endif

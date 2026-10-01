@@ -174,6 +174,7 @@ private:
 	u32	_fsize;
 	BackupDeviceFileInfo _info;
 	int readFooter();
+	void _openBackupFile();
 	bool write(u8 val);
 	u8	read();
 	bool saveBuffer(u8 *data, u32 size, bool willRewind, bool willTruncate = false);

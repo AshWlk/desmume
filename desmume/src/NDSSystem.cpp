@@ -453,6 +453,23 @@ bool GameInfo::loadROM(std::string fname, u32 type)
 	fROM = reader->Init(fname.c_str());
 	if (!fROM) return false;
 
+	return _loadROMFromOpenReader(type);
+}
+
+bool GameInfo::loadROMFromMemory(const u8 *data, u32 size)
+{
+	closeROM();
+
+	romdataForReader = new u8[size];
+	memcpy(romdataForReader, data, size);
+	reader = MemROMReaderRead_TrueInit(romdataForReader, (int)size);
+	fROM = reader->Init(NULL); //the memory reader has no file handle, so this is always NULL
+
+	return _loadROMFromOpenReader(ROM_NDS);
+}
+
+bool GameInfo::_loadROMFromOpenReader(u32 type)
+{
 	headerOffset = (type == ROM_DSGBA)?DSGBA_LOADER_SIZE:0;
 	romsize = reader->Size(fROM) - headerOffset;
 	reader->Seek(fROM, headerOffset, SEEK_SET);
@@ -558,7 +575,8 @@ bool GameInfo::loadROM(std::string fname, u32 type)
 			loadToMemory = true;
 
 		//convert to an in-memory reader around a pre-read buffer if that's what's requested
-		if (loadToMemory)
+		//(unless loadROMFromMemory already did)
+		if (loadToMemory && romdataForReader == NULL)
 		{
 			reader->Seek(fROM, headerOffset, SEEK_SET);
 			
@@ -709,34 +727,8 @@ struct LastRom {
 	std::string filename, physicalName, logicalFilename;
 } lastRom;
 
-int NDS_LoadROM(const char *filename, const char *physicalName, const char *logicalFilename)
+static void _ComputeROMChecksumsAndChipID()
 {
-	lastRom.filename = filename;
-	lastRom.physicalName = physicalName ? physicalName : "";
-	lastRom.logicalFilename = logicalFilename ? logicalFilename : "";
-
-	int	ret;
-	char	buf[MAX_PATH];
-
-	if (filename == NULL)
-		return -1;
-
-	ret = rom_init_path(filename, physicalName, logicalFilename);
-	if (ret < 1)
-		return ret;
-
-	if (cheatSearch)
-		cheatSearch->close();
-	FCEUI_StopMovie();
-	
-	if (!gameInfo.ValidateHeader())
-	{
-		ret = -1;
-		return ret;
-	}
-	
-	gameInfo.populate();
-	
 	//run crc over the whole buffer (chunk at a time, to avoid coding a streaming crc
 	gameInfo.reader->Seek(gameInfo.fROM, 0, SEEK_SET);
 	gameInfo.crc = 0;
@@ -773,6 +765,37 @@ int NDS_LoadROM(const char *filename, const char *physicalName, const char *logi
 		//		gameInfo.chipID |= (0x40 << 24);
 		gameInfo.chipID |= (0x00 << 24);
 	}
+}
+
+int NDS_LoadROM(const char *filename, const char *physicalName, const char *logicalFilename)
+{
+	lastRom.filename = filename;
+	lastRom.physicalName = physicalName ? physicalName : "";
+	lastRom.logicalFilename = logicalFilename ? logicalFilename : "";
+
+	int	ret;
+	char	buf[MAX_PATH];
+
+	if (filename == NULL)
+		return -1;
+
+	ret = rom_init_path(filename, physicalName, logicalFilename);
+	if (ret < 1)
+		return ret;
+
+	if (cheatSearch)
+		cheatSearch->close();
+	FCEUI_StopMovie();
+	
+	if (!gameInfo.ValidateHeader())
+	{
+		ret = -1;
+		return ret;
+	}
+	
+	gameInfo.populate();
+	
+	_ComputeROMChecksumsAndChipID();
 
 	INFO("\nROM game code: %c%c%c%c\n", gameInfo.header.gameCode[0], gameInfo.header.gameCode[1], gameInfo.header.gameCode[2], gameInfo.header.gameCode[3]);
 	INFO("ROM crc: %08X\n", gameInfo.crc);
@@ -835,6 +858,33 @@ int NDS_LoadROM(const char *filename, const char *physicalName, const char *logi
 	NDS_Reset();
 
 	return ret;
+}
+
+int NDS_LoadROMFromMemory(const u8 *data, u32 size)
+{
+	if (data == NULL || size < 352)
+		return -1;
+
+	//NDS_Reset is a no-op without a lastRom name. the memory reader stays live in gameInfo,
+	//so NDS_Reset never tries to reopen this "file" from disk.
+	lastRom.filename = "<memory>";
+	lastRom.physicalName = "";
+	lastRom.logicalFilename = "";
+
+	if (!gameInfo.loadROMFromMemory(data, size) || gameInfo.romsize < 352)
+		return -1;
+
+	gameInfo.romType = ROM_NDS;
+
+	if (!gameInfo.ValidateHeader())
+		return -1;
+
+	gameInfo.populate();
+	_ComputeROMChecksumsAndChipID();
+
+	NDS_Reset();
+
+	return 1;
 }
 
 void NDS_FreeROM(void)
@@ -3419,6 +3469,7 @@ TCommonSettings::TCommonSettings()
 	autodetectBackupMethod = BackupDeviceAutodetectMethod_Desmume;
 	manualBackupType = MC_TYPE_AUTODETECT;
 	backupSave = false;
+	backupDeviceInMemory = false;
 	
 	SPU_sync_mode = ESynchMode_Synchronous;
 	SPU_sync_method = ESynchMethod_N;
