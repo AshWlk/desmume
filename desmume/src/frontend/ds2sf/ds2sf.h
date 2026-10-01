@@ -91,6 +91,53 @@ DS2SF_API const char *ds2sf_render(ds2sf_t *ds, int16_t *out, size_t count);
 
 DS2SF_API uint32_t ds2sf_get_sample_rate(const ds2sf_t *ds);
 
+/*
+	Per-channel output, for splitting a track into stems.
+
+	With channel output enabled, every rendered frame is also kept per SPU channel (each channel's
+	volume-scaled, panned contribution to the mixer), along with a log of the key-ons that start each
+	note. Summing the 16 channels and clamping to int16 reproduces the mix, unless SOUNDCNT routes
+	channels around the mixer (see DS2SF_ROUTING_OUTPUT_BYPASS).
+*/
+
+/* ds2sf_keyon_event.flags */
+#define DS2SF_KEYON_CAPTURE_BUFFER 0x01 /* the address lies in a sound-capture destination buffer */
+
+/* A channel starting a note: from `offset` on, the channel plays this sample until its next key-on. */
+typedef struct ds2sf_keyon_event
+{
+	uint32_t offset;  /* frame within the ds2sf_render_channels output at which the note starts */
+	uint8_t  channel; /* 0-15 */
+	uint8_t  format;  /* 0 PCM8, 1 PCM16, 2 IMA-ADPCM, 3 PSG (channels 8-13 square, 14-15 noise) */
+	uint8_t  duty;    /* PSG square duty cycle, 0-7 (format 3 only) */
+	uint8_t  flags;   /* DS2SF_KEYON_* */
+	uint32_t address; /* SOUNDxSAD, the sample's start address (formats 0-2) */
+} ds2sf_keyon_event;
+
+/* ds2sf_get_routing_flags bits, accumulated while channel output is enabled */
+#define DS2SF_ROUTING_OUTPUT_BYPASS 0x01 /* SOUNDCNT sent channel 1/3 around the mixer: the channels no longer sum to the mix */
+#define DS2SF_ROUTING_CAPTURE       0x02 /* a sound-capture unit ran */
+
+/* Starts (non-zero) or stops (0) keeping per-channel output. Enable it before loading the ROM, or
+   at least before rendering: audio already buffered when it is enabled has silent channels. Notes
+   still sounding when it is enabled, or across ds2sf_run_frames, are re-reported at the next
+   rendered frame. Disabling discards any buffered channel output and key-ons. */
+DS2SF_API const char *ds2sf_set_channel_output(ds2sf_t *ds, int enabled);
+
+/* ds2sf_render, plus each channel's output for the same frames. Requires channel output enabled.
+   `mix`      (may be NULL): `count` interleaved stereo frames, exactly as ds2sf_render.
+   `channels` : 16 * count interleaved stereo frames, channel-major: channel c's frames start at
+                channels + c * count * 2.
+   `events`   : the key-ons in these frames, ordered by offset (per channel, chronologically). At most
+                one is reported per channel per frame, so 16 * count entries always suffice; fewer
+                fails the call if the frames hold more key-ons than fit.
+   `event_count` receives the number of entries written. */
+DS2SF_API const char *ds2sf_render_channels(ds2sf_t *ds, int16_t *mix, int16_t *channels, size_t count,
+	ds2sf_keyon_event *events, size_t event_capacity, size_t *event_count);
+
+/* DS2SF_ROUTING_* flags seen since channel output was enabled. */
+DS2SF_API uint32_t ds2sf_get_routing_flags(const ds2sf_t *ds);
+
 #ifdef __cplusplus
 }
 #endif

@@ -237,6 +237,64 @@ static int boot(ds2sf_t *ds, const rom_image *rom)
 	return 1;
 }
 
+/* Re-renders with per-channel output in odd-sized chunks: the mix must be unchanged, the channels
+   must sum (clamped) to it, and the test ROM's single PSG key-on must be reported. Then keys the
+   note on during ds2sf_run_frames, which must re-report it at the first rendered frame. */
+static void check_channel_output(ds2sf_t *ds, const rom_image *rom, const int16_t *expected, size_t frames)
+{
+	const size_t chunk = 777;
+	int16_t *mix = malloc(chunk * 4), *channels = malloc(16 * chunk * 4);
+	ds2sf_keyon_event *events = malloc(16 * chunk * sizeof *events);
+	size_t mismatched_mix = 0, mismatched_sum = 0, keyons = 0, first_keyon = 0;
+	int keyon_channel = -1, keyon_format = -1;
+	const char *err = NULL;
+
+	err = ds2sf_reset(ds);
+	if (!err) err = ds2sf_set_channel_output(ds, 1);
+	if (!err && rom->initial_frames > 0) err = ds2sf_run_frames(ds, (uint32_t)rom->initial_frames);
+	for (size_t done = 0; !err && done < frames; done += chunk)
+	{
+		size_t n = frames - done < chunk ? frames - done : chunk, count = 0;
+		err = ds2sf_render_channels(ds, mix, channels, n, events, 16 * n, &count);
+		if (err) break;
+		for (size_t i = 0; i < n * 2; i++)
+		{
+			int32_t sum = 0;
+			for (int c = 0; c < 16; c++) sum += channels[c * n * 2 + i];
+			sum = sum < -32768 ? -32768 : sum > 32767 ? 32767 : sum;
+			mismatched_mix += mix[i] != expected[done * 2 + i];
+			mismatched_sum += sum != mix[i];
+		}
+		for (size_t i = 0; i < count; i++, keyons++)
+		{
+			if (keyons == 0) { first_keyon = done + events[i].offset; keyon_channel = events[i].channel; keyon_format = events[i].format; }
+		}
+	}
+	CHECK(err == NULL, "render with channel output in %zu-frame chunks%s%s", chunk, err ? ": " : "", err ? err : "");
+	CHECK(mismatched_mix == 0, "mix is unchanged with channel output enabled (%zu samples differ)", mismatched_mix);
+	CHECK(mismatched_sum == 0, "channels sum to the mix (%zu samples differ)", mismatched_sum);
+	CHECK(keyons == 1 && keyon_channel == 8 && keyon_format == 3,
+		"one key-on reported, PSG on channel 8 (%zu key-ons, first: channel %d format %d at frame %zu)",
+		keyons, keyon_channel, keyon_format, first_keyon);
+
+	/* The note keys on within the first frames after boot; key it on during a pre-roll instead. */
+	size_t count = 0;
+	err = ds2sf_reset(ds);
+	if (!err) err = ds2sf_run_frames(ds, 30);
+	if (!err) err = ds2sf_render_channels(ds, mix, channels, chunk, events, 16 * chunk, &count);
+	CHECK(err == NULL && count == 1 && events[0].offset == 0 && events[0].channel == 8,
+		"a note keyed on during ds2sf_run_frames is reported at frame 0 (%zu key-ons, first at %u)",
+		count, count ? events[0].offset : 0);
+
+	err = ds2sf_set_channel_output(ds, 0);
+	CHECK(err == NULL && ds2sf_render_channels(ds, mix, channels, 16, events, 256, &count) != NULL,
+		"render_channels is refused once channel output is disabled");
+
+	free(mix);
+	free(channels);
+	free(events);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2)
@@ -294,6 +352,8 @@ int main(int argc, char **argv)
 	err = render_all(ds, b, frames, 777);
 	CHECK(err == NULL, "re-render after reset in 777-frame chunks");
 	CHECK(memcmp(a, b, frames * 4) == 0, "reset + chunked re-render is bit-identical to the first render");
+
+	check_channel_output(ds, &rom, a, frames);
 
 	ds2sf_destroy(ds);
 

@@ -124,6 +124,9 @@ u32 SPU_GetSampleRate()
 	return _sampleRate;
 }
 
+SPU_ChannelOutputTapFn SPU_ChannelOutputTap = NULL;
+SPU_KeyOnTapFn SPU_KeyOnTap = NULL;
+
 static double _samples = 0;
 int spu_core_samples = 0;
 
@@ -484,6 +487,9 @@ void SPU_struct::KeyOn(int channel)
 			thischan.status = CHANSTAT_STOPPED;
 		}
 	}
+
+	if (SPU_KeyOnTap && this == SPU_core && thischan.status == CHANSTAT_PLAY)
+		SPU_KeyOnTap(this, channel);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -1383,6 +1389,9 @@ static void SPU_MixAudio_Advanced(bool actuallyMix, SPU_struct *SPU, int length)
 				//save the panned results
 				submix[i*2] = SPU->sndbuf[0];
 				submix[i*2+1] = SPU->sndbuf[1];
+
+				if (SPU_ChannelOutputTap && SPU == SPU_core)
+					SPU_ChannelOutputTap(i, samp, submix[i*2], submix[i*2+1]);
 
 				//send sample to our capture mix
 				if (outputToCap)

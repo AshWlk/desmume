@@ -308,4 +308,19 @@ void WAV_WavSoundUpdate(void* soundData, int numSamples, WAVMode mode=WAVMODE_CO
 void SPU_SetSampleRate(u32 sampleRate);
 u32 SPU_GetSampleRate();
 
+// Optional observers for frontends that split the output per channel (libds2sf's stems). Both are
+// NULL by default and only fire for SPU_core.
+//
+// SPU_ChannelOutputTap: once per mixed sample for every playing channel, with that channel's
+// volume-scaled, panned contribution to the mixer (before master volume). `sampleIndex` counts from
+// 0 within the current SPU_Emulate_core batch, i.e. the batch the next FetchSamples call receives.
+// Only the advanced mixer (CommonSettings.spu_advanced) calls it.
+//
+// SPU_KeyOnTap: after a channel has keyed on and latched its registers. Key-ons happen on register
+// writes, i.e. between SPU_Emulate_core batches, so they take effect at the start of the next batch.
+typedef void (*SPU_ChannelOutputTapFn)(int channel, int sampleIndex, s32 left, s32 right);
+typedef void (*SPU_KeyOnTapFn)(const SPU_struct *spu, int channel);
+extern SPU_ChannelOutputTapFn SPU_ChannelOutputTap;
+extern SPU_KeyOnTapFn SPU_KeyOnTap;
+
 #endif

@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <algorithm>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -83,18 +85,124 @@ GPU3DInterface *core3DList[] = {
 // default dual synch/asynch mode the mix is deferred to SPU_Emulate_user, which we never call).
 // ---------------------------------------------------------------------------------------------
 
+static const int kChannels = 16;
+
 static std::vector<s16> g_pending; // interleaved stereo
 static size_t g_pendingStart = 0;  // index of the first unconsumed value in g_pending
+static u64 g_producedFrames = 0;   // frames ever appended to g_pending; positions key-ons in the stream
+
+// Per-channel output (ds2sf_set_channel_output). g_channelPending[c] mirrors g_pending exactly: same
+// length, same g_pendingStart. Key-ons are kept with absolute frame positions until consumed.
+struct PendingKeyon
+{
+	u64 frame;
+	ds2sf_keyon_event event; // offset is filled in when the event is handed out
+};
+
+static bool g_channelOutput = false;
+static std::vector<s16> g_channelPending[kChannels];
+static std::vector<s16> g_channelBatch[kChannels]; // the SPU batch being mixed, filled by ChannelOutputTap
+static std::deque<PendingKeyon> g_keyons;           // ordered by frame
+static ds2sf_keyon_event g_lastKeyon[kChannels];    // each channel's latest note, for ResyncChannels
+static bool g_lastKeyonValid[kChannels];
+static u32 g_routingFlags = 0;
 
 static void PendingClear()
 {
 	g_pending.clear();
 	g_pendingStart = 0;
+	for (int c = 0; c < kChannels; c++)
+		g_channelPending[c].clear();
+	g_keyons.clear();
 }
 
 static size_t PendingFrames()
 {
 	return (g_pending.size() - g_pendingStart) / 2;
+}
+
+// Records a key-on at `frame`. A later key-on of the same channel at the same frame replaces the
+// earlier one, which never produced a sample.
+static void PushKeyon(u64 frame, const ds2sf_keyon_event &event)
+{
+	for (auto it = g_keyons.rbegin(); it != g_keyons.rend() && it->frame == frame; ++it)
+	{
+		if (it->event.channel == event.channel)
+		{
+			it->event = event;
+			return;
+		}
+	}
+
+	g_keyons.push_back({ frame, event });
+}
+
+// After audio has been discarded (or before channel output starts), notes that are still sounding
+// would otherwise have no key-on in the stream; report them again at the next frame.
+static void ResyncChannels()
+{
+	if (SPU_core == NULL)
+		return;
+
+	for (int c = 0; c < kChannels; c++)
+	{
+		if (SPU_core->channels[c].status == CHANSTAT_PLAY && g_lastKeyonValid[c])
+			PushKeyon(g_producedFrames, g_lastKeyon[c]);
+	}
+}
+
+// A reboot stops every channel; forget their notes so nothing stale is ever re-reported.
+static void ForgetKeyons()
+{
+	for (int c = 0; c < kChannels; c++)
+		g_lastKeyonValid[c] = false;
+}
+
+static void KeyOnTap(const SPU_struct *spu, int channel)
+{
+	const channel_struct &chan = spu->channels[channel];
+
+	ds2sf_keyon_event event;
+	memset(&event, 0, sizeof(event));
+	event.channel = (uint8_t)channel;
+	event.format = chan.format;
+	event.duty = chan.waveduty;
+	event.address = chan.addr;
+	for (int i = 0; i < 2; i++)
+	{
+		const SPU_struct::REGS::CAP &cap = spu->regs.cap[i];
+		if (chan.format != 3 && cap.len != 0 && chan.addr >= cap.dad && chan.addr < cap.dad + cap.len * 4u)
+			event.flags |= DS2SF_KEYON_CAPTURE_BUFFER;
+	}
+
+	g_lastKeyon[channel] = event;
+	g_lastKeyonValid[channel] = true;
+
+	// Key-ons happen between SPU batches, so this note starts with the next frame produced.
+	if (g_channelOutput)
+		PushKeyon(g_producedFrames, event);
+}
+
+static void ChannelOutputTap(int channel, int sampleIndex, s32 left, s32 right)
+{
+	std::vector<s16> &batch = g_channelBatch[channel];
+	const size_t index = (size_t)sampleIndex * 2;
+	if (index + 2 > batch.size())
+		batch.resize(index + 2, 0);
+
+	batch[index] = (s16)std::min(std::max(left, -0x8000), 0x7FFF);
+	batch[index + 1] = (s16)std::min(std::max(right, -0x8000), 0x7FFF);
+}
+
+static void AppendSilence(size_t frames)
+{
+	g_pending.insert(g_pending.end(), frames * 2, 0);
+	if (g_channelOutput)
+	{
+		for (int c = 0; c < kChannels; c++)
+			g_channelPending[c].insert(g_channelPending[c].end(), frames * 2, 0);
+	}
+	g_producedFrames += frames;
 }
 
 static int Ds2sfSndInit(int) { PendingClear(); return 0; }
@@ -107,6 +215,77 @@ static void Ds2sfSndSetVolume(int) {}
 static void Ds2sfSndFetchSamples(s16 *sampleBuffer, size_t sampleCount, ESynchMode, ISynchronizingAudioBuffer *)
 {
 	g_pending.insert(g_pending.end(), sampleBuffer, sampleBuffer + sampleCount * 2);
+	g_producedFrames += sampleCount;
+
+	if (!g_channelOutput)
+		return;
+
+	// Channels that weren't playing never called the tap; their batch is (padded with) silence.
+	for (int c = 0; c < kChannels; c++)
+	{
+		std::vector<s16> &batch = g_channelBatch[c];
+		batch.resize(sampleCount * 2, 0);
+		g_channelPending[c].insert(g_channelPending[c].end(), batch.begin(), batch.end());
+		std::fill(batch.begin(), batch.end(), 0);
+	}
+
+	const SPU_struct::REGS &regs = SPU_core->regs;
+	if (regs.ctl_left != SPU_struct::REGS::LOM_LEFT_MIXER || regs.ctl_right != SPU_struct::REGS::ROM_RIGHT_MIXER
+		|| regs.ctl_ch1bypass || regs.ctl_ch3bypass)
+		g_routingFlags |= DS2SF_ROUTING_OUTPUT_BYPASS;
+	if (regs.cap[0].runtime.running || regs.cap[1].runtime.running)
+		g_routingFlags |= DS2SF_ROUTING_CAPTURE;
+}
+
+// Moves `count` frames (and the key-ons within them) out of the pending buffers. `mix` and `channels`
+// may be NULL to drop that output. The caller has already emulated enough frames.
+static const char *ConsumeFrames(size_t count, int16_t *mix, int16_t *channels,
+	ds2sf_keyon_event *events, size_t eventCapacity, size_t *eventCount)
+{
+	const u64 first = g_producedFrames - PendingFrames();
+	const u64 end = first + count;
+
+	size_t due = 0;
+	while (due < g_keyons.size() && g_keyons[due].frame < end)
+		due++;
+
+	if (events != NULL)
+	{
+		if (due > eventCapacity)
+			return "more key-ons than the event buffer holds";
+
+		for (size_t i = 0; i < due; i++)
+		{
+			events[i] = g_keyons[i].event;
+			events[i].offset = (uint32_t)(g_keyons[i].frame - first);
+		}
+		*eventCount = due;
+	}
+	g_keyons.erase(g_keyons.begin(), g_keyons.begin() + due);
+
+	const size_t values = count * 2;
+	if (mix != NULL)
+		memcpy(mix, &g_pending[g_pendingStart], values * sizeof(s16));
+	if (channels != NULL)
+	{
+		for (int c = 0; c < kChannels; c++)
+			memcpy(channels + c * values, &g_channelPending[c][g_pendingStart], values * sizeof(s16));
+	}
+	g_pendingStart += values;
+
+	// Compact once the consumed prefix dominates, so the buffers stay about one frame long.
+	if (g_pendingStart >= g_pending.size() / 2)
+	{
+		g_pending.erase(g_pending.begin(), g_pending.begin() + g_pendingStart);
+		if (g_channelOutput)
+		{
+			for (int c = 0; c < kChannels; c++)
+				g_channelPending[c].erase(g_channelPending[c].begin(), g_channelPending[c].begin() + g_pendingStart);
+		}
+		g_pendingStart = 0;
+	}
+
+	return NULL;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -296,8 +475,7 @@ static const char *RunOneFrame(ds2sf *ds)
 	// ds2sf_render could spin forever waiting for samples.
 	if (PendingFrames() == before)
 	{
-		const size_t silentFrames = (size_t)(ds->sampleRate / kFramesPerSecond + 0.5);
-		g_pending.insert(g_pending.end(), silentFrames * 2, 0);
+		AppendSilence((size_t)(ds->sampleRate / kFramesPerSecond + 0.5));
 	}
 
 	return NULL;
@@ -347,6 +525,10 @@ DS2SF_API ds2sf_t *ds2sf_create(const ds2sf_config *config)
 
 	execute = false;
 	PendingClear();
+	ForgetKeyons();
+	g_channelOutput = false;
+	SPU_KeyOnTap = KeyOnTap;
+	SPU_ChannelOutputTap = NULL;
 
 	ds2sf *ds = new ds2sf;
 	ds->sampleRate = sampleRate;
@@ -364,6 +546,9 @@ DS2SF_API void ds2sf_destroy(ds2sf_t *ds)
 	if (ds->romLoaded)
 		NDS_FreeROM();
 
+	SPU_KeyOnTap = NULL;
+	SPU_ChannelOutputTap = NULL;
+	g_channelOutput = false;
 	PendingClear();
 	rtcClearFixedStartTime();
 
@@ -401,6 +586,7 @@ DS2SF_API const char *ds2sf_load_rom(ds2sf_t *ds, const uint8_t *rom, size_t siz
 
 	ds->romLoaded = true;
 	PendingClear();
+	ForgetKeyons();
 	execute = true;
 	return NULL;
 }
@@ -414,6 +600,7 @@ DS2SF_API const char *ds2sf_reset(ds2sf_t *ds)
 
 	NDS_Reset();
 	PendingClear();
+	ForgetKeyons();
 	execute = true;
 	return NULL;
 }
@@ -432,6 +619,8 @@ DS2SF_API const char *ds2sf_run_frames(ds2sf_t *ds, uint32_t frames)
 	}
 
 	PendingClear();
+	if (g_channelOutput)
+		ResyncChannels();
 	return NULL;
 }
 
@@ -452,18 +641,59 @@ DS2SF_API const char *ds2sf_render(ds2sf_t *ds, int16_t *out, size_t count)
 			return err;
 	}
 
-	const size_t values = count * 2;
-	memcpy(out, &g_pending[g_pendingStart], values * sizeof(s16));
-	g_pendingStart += values;
+	return ConsumeFrames(count, out, NULL, NULL, 0, NULL);
+}
 
-	// Compact once the consumed prefix dominates, so the buffer stays about one frame long.
-	if (g_pendingStart >= g_pending.size() / 2)
+DS2SF_API const char *ds2sf_set_channel_output(ds2sf_t *ds, int enabled)
+{
+	if (ds == NULL || ds != g_instance)
+		return "invalid ds2sf instance";
+
+	for (int c = 0; c < kChannels; c++)
 	{
-		g_pending.erase(g_pending.begin(), g_pending.begin() + g_pendingStart);
-		g_pendingStart = 0;
+		g_channelBatch[c].clear();
+		// Frames already buffered were mixed without the tap: their channel output is silence.
+		g_channelPending[c].assign(enabled ? g_pending.size() : 0, 0);
+	}
+	g_keyons.clear();
+	g_routingFlags = 0;
+
+	g_channelOutput = enabled != 0;
+	SPU_ChannelOutputTap = g_channelOutput ? ChannelOutputTap : NULL;
+	if (g_channelOutput)
+		ResyncChannels();
+	return NULL;
+}
+
+DS2SF_API const char *ds2sf_render_channels(ds2sf_t *ds, int16_t *mix, int16_t *channels, size_t count,
+	ds2sf_keyon_event *events, size_t event_capacity, size_t *event_count)
+{
+	if (ds == NULL || ds != g_instance)
+		return "invalid ds2sf instance";
+	if (channels == NULL || events == NULL || event_count == NULL)
+		return Fail(ds, "channel, event or event count buffer is NULL");
+	*event_count = 0;
+	if (!g_channelOutput)
+		return Fail(ds, "channel output is not enabled (ds2sf_set_channel_output)");
+	if (count == 0)
+		return NULL;
+	if (!ds->romLoaded)
+		return Fail(ds, "no ROM loaded");
+
+	while (PendingFrames() < count)
+	{
+		if (const char *err = RunOneFrame(ds))
+			return err;
 	}
 
+	if (const char *err = ConsumeFrames(count, mix, channels, events, event_capacity, event_count))
+		return Fail(ds, err);
 	return NULL;
+}
+
+DS2SF_API uint32_t ds2sf_get_routing_flags(const ds2sf_t *ds)
+{
+	return ds != NULL && ds == g_instance ? g_routingFlags : 0;
 }
 
 DS2SF_API uint32_t ds2sf_get_sample_rate(const ds2sf_t *ds)
